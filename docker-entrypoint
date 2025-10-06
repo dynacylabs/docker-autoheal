@@ -170,7 +170,7 @@ then
         fi
         notify_post_restart_script "$CONTAINER_NAME" "$CONTAINER_SHORT_ID" "$CONTAINER_STATE" "$TIMEOUT" &
       fi
-    done
+    done || true
     sleep "$AUTOHEAL_INTERVAL" &
     wait $!
   done
