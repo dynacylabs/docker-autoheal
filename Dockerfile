@@ -19,7 +19,7 @@ ENV AUTOHEAL_CONTAINER_LABEL=autoheal \
 
 COPY docker-entrypoint /
 
-HEALTHCHECK --interval=5s CMD pgrep -f autoheal || exit 1
+HEALTHCHECK --interval=5s CMD pgrep -f docker-entrypoint || exit 1
 
 ENTRYPOINT ["/docker-entrypoint"]
 
