@@ -36,6 +36,9 @@ echo AUTOHEAL_START_PERIOD=${AUTOHEAL_START_PERIOD}
 echo AUTOHEAL_INTERVAL=${AUTOHEAL_INTERVAL}
 echo AUTOHEAL_DEFAULT_STOP_TIMEOUT=${AUTOHEAL_DEFAULT_STOP_TIMEOUT}
 echo AUTOHEAL_ONLY_MONITOR_RUNNING=${AUTOHEAL_ONLY_MONITOR_RUNNING}
+echo DOCKER_SOCK=${DOCKER_SOCK}
+echo HTTP_ENDPOINT=${HTTP_ENDPOINT}
+echo UNIX_SOCK=${UNIX_SOCK}
 
 docker_curl() {
   curl --max-time "${CURL_TIMEOUT}" --no-buffer -s \
@@ -131,9 +134,21 @@ if [ "$1" = "autoheal" ]
 then
   if [ -n "$UNIX_SOCK" ] && ! [ -S "$DOCKER_SOCK" ]
   then
-    echo "unix socket is currently not available" >&2
+    echo "ERROR: Docker socket $DOCKER_SOCK is not available or not a socket" >&2
+    ls -la "$(dirname "$DOCKER_SOCK")" 2>&1 || echo "Cannot list directory"
+    echo "Please ensure Docker socket is mounted: -v /var/run/docker.sock:/var/run/docker.sock" >&2
     exit 1
   fi
+  
+  # Test Docker API connection
+  echo "Testing Docker API connection..."
+  if ! docker_curl "${HTTP_ENDPOINT}/_ping" > /dev/null 2>&1
+  then
+    echo "WARNING: Docker API connection test failed. Will continue anyway and retry on failures." >&2
+  else
+    echo "Docker API connection: OK"
+  fi
+  
   # Delayed startup
   if [ "$AUTOHEAL_START_PERIOD" -gt 0 ]
   then
