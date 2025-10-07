@@ -145,7 +145,22 @@ then
   while true
   do
     STOP_TIMEOUT=".Labels[\"autoheal.stop.timeout\"] // $AUTOHEAL_DEFAULT_STOP_TIMEOUT"
-    get_container_info | \
+    
+    # Disable exit on error for the container info pipeline to prevent script crashes
+    set +e
+    CONTAINER_INFO=$(get_container_info)
+    CURL_EXIT_CODE=$?
+    set -e
+    
+    if [ $CURL_EXIT_CODE -ne 0 ]; then
+      DATE=$(date +%d-%m-%Y" "%H:%M:%S)
+      echo "$DATE Failed to query Docker API (exit code: $CURL_EXIT_CODE). Will retry in $AUTOHEAL_INTERVAL seconds." >&2
+      sleep "$AUTOHEAL_INTERVAL" &
+      wait $!
+      continue
+    fi
+    
+    echo "$CONTAINER_INFO" | \
       jq -r ".[] | foreach . as \$CONTAINER([];[]; \$CONTAINER | .Id, .Names[0], .State, ${STOP_TIMEOUT})" | \
       while read -r CONTAINER_ID && read -r CONTAINER_NAME && read -r CONTAINER_STATE && read -r TIMEOUT
     do
