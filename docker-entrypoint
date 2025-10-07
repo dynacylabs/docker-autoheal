@@ -41,10 +41,15 @@ echo HTTP_ENDPOINT=${HTTP_ENDPOINT}
 echo UNIX_SOCK=${UNIX_SOCK}
 
 docker_curl() {
-  curl --max-time "${CURL_TIMEOUT}" --no-buffer -s \
-  ${CA} ${CLIENT_KEY} ${CLIENT_CERT} \
-  ${UNIX_SOCK} \
-  "$@"
+  # Build curl command with only non-empty options
+  local curl_opts="--max-time ${CURL_TIMEOUT} --no-buffer -s"
+  [ -n "$CA" ] && curl_opts="$curl_opts $CA"
+  [ -n "$CLIENT_KEY" ] && curl_opts="$curl_opts $CLIENT_KEY"
+  [ -n "$CLIENT_CERT" ] && curl_opts="$curl_opts $CLIENT_CERT"
+  [ -n "$UNIX_SOCK" ] && curl_opts="$curl_opts $UNIX_SOCK"
+  
+  # Execute curl with constructed options
+  eval curl $curl_opts '"$@"'
 }
 
 # shellcheck disable=2039
@@ -67,6 +72,7 @@ get_container_info() {
     running_filter=",\"status\":\[\"running\"\]"
   fi
   url="${HTTP_ENDPOINT}/containers/json?filters=\{\"health\":\[\"unhealthy\"\]${label_filter}${running_filter}\}"
+  echo "DEBUG: Requesting URL: $url" >&2
   docker_curl "$url"
 }
 
@@ -140,13 +146,25 @@ then
     exit 1
   fi
   
+  # Show socket information
+  if [ -n "$UNIX_SOCK" ]; then
+    echo "Docker socket info:"
+    ls -lah "$DOCKER_SOCK" 2>&1 || echo "Cannot stat $DOCKER_SOCK"
+    echo "Current user: $(id)"
+  fi
+  
   # Test Docker API connection
   echo "Testing Docker API connection..."
-  if ! docker_curl "${HTTP_ENDPOINT}/_ping" > /dev/null 2>&1
+  TEST_OUTPUT=$(docker_curl "${HTTP_ENDPOINT}/_ping" 2>&1)
+  TEST_EXIT_CODE=$?
+  if [ $TEST_EXIT_CODE -ne 0 ]
   then
-    echo "WARNING: Docker API connection test failed. Will continue anyway and retry on failures." >&2
+    echo "WARNING: Docker API connection test failed (exit code: $TEST_EXIT_CODE)" >&2
+    echo "Curl output: $TEST_OUTPUT" >&2
+    echo "Will continue anyway and retry on failures." >&2
   else
     echo "Docker API connection: OK"
+    echo "API response: $TEST_OUTPUT"
   fi
   
   # Delayed startup
