@@ -4,6 +4,16 @@ set -e
 # shellcheck disable=2039
 set -o pipefail
 
+# Debug mode configuration
+DEBUG=${DEBUG:-false}
+
+debug_log() {
+  if [ "$DEBUG" = "true" ]
+  then
+    echo "[DEBUG] $(date +%d-%m-%Y" "%H:%M:%S) $@" >&2
+  fi
+}
+
 DOCKER_SOCK=${DOCKER_SOCK:-/var/run/docker.sock}
 UNIX_SOCK=""
 CURL_TIMEOUT=${CURL_TIMEOUT:-30}
@@ -11,17 +21,24 @@ WEBHOOK_URL=${WEBHOOK_URL:-""}
 WEBHOOK_JSON_KEY=${WEBHOOK_JSON_KEY:-"text"}
 APPRISE_URL=${APPRISE_URL:-""}
 
+debug_log "Script started"
+debug_log "DEBUG mode: $DEBUG"
+debug_log "DOCKER_SOCK: $DOCKER_SOCK"
+
 # only use unix domain socket if no TCP endpoint is defined
 case "${DOCKER_SOCK}" in
   "tcp://"*) HTTP_ENDPOINT="$(echo "${DOCKER_SOCK}" | sed 's#tcp://#http://#')"
+             debug_log "Using TCP endpoint: $HTTP_ENDPOINT"
              ;;
   "tcps://"*) HTTP_ENDPOINT="$(echo "${DOCKER_SOCK}" | sed 's#tcps://#https://#')"
              CA="--cacert /certs/ca.pem"
              CLIENT_KEY="--key /certs/client-key.pem"
              CLIENT_CERT="--cert /certs/client-cert.pem"
+             debug_log "Using TCPS endpoint: $HTTP_ENDPOINT with TLS certs"
              ;;
   *)         HTTP_ENDPOINT="http://localhost"
              UNIX_SOCK="--unix-socket ${DOCKER_SOCK}"
+             debug_log "Using Unix socket: $DOCKER_SOCK"
              ;;
 esac
 
@@ -37,11 +54,33 @@ echo AUTOHEAL_INTERVAL=${AUTOHEAL_INTERVAL}
 echo AUTOHEAL_DEFAULT_STOP_TIMEOUT=${AUTOHEAL_DEFAULT_STOP_TIMEOUT}
 echo AUTOHEAL_ONLY_MONITOR_RUNNING=${AUTOHEAL_ONLY_MONITOR_RUNNING}
 
+debug_log "Configuration loaded:"
+debug_log "  AUTOHEAL_CONTAINER_LABEL: $AUTOHEAL_CONTAINER_LABEL"
+debug_log "  AUTOHEAL_START_PERIOD: $AUTOHEAL_START_PERIOD"
+debug_log "  AUTOHEAL_INTERVAL: $AUTOHEAL_INTERVAL"
+debug_log "  AUTOHEAL_DEFAULT_STOP_TIMEOUT: $AUTOHEAL_DEFAULT_STOP_TIMEOUT"
+debug_log "  AUTOHEAL_ONLY_MONITOR_RUNNING: $AUTOHEAL_ONLY_MONITOR_RUNNING"
+debug_log "  CURL_TIMEOUT: $CURL_TIMEOUT"
+debug_log "  WEBHOOK_URL: ${WEBHOOK_URL:+(set)}"
+debug_log "  APPRISE_URL: ${APPRISE_URL:+(set)}"
+
 docker_curl() {
-  curl --max-time "${CURL_TIMEOUT}" --no-buffer -s \
+  debug_log "Executing docker_curl: $@"
+  local result
+  result=$(curl --max-time "${CURL_TIMEOUT}" --no-buffer -s \
   ${CA} ${CLIENT_KEY} ${CLIENT_CERT} \
   ${UNIX_SOCK} \
-  "$@"
+  "$@" 2>&1)
+  local exit_code=$?
+  if [ $exit_code -ne 0 ]
+  then
+    debug_log "docker_curl failed with exit code $exit_code"
+    debug_log "docker_curl output: $result"
+  else
+    debug_log "docker_curl succeeded"
+  fi
+  echo "$result"
+  return $exit_code
 }
 
 # shellcheck disable=2039
@@ -50,21 +89,31 @@ get_container_info() {
   local running_filter
   local url
 
+  debug_log "Getting container info..."
+
   # Set container selector
   if [ "$AUTOHEAL_CONTAINER_LABEL" = "all" ]
   then
     label_filter=""
+    debug_log "Label filter: all containers"
   else
     label_filter=",\"label\":\[\"${AUTOHEAL_CONTAINER_LABEL}=true\"\]"
+    debug_log "Label filter: ${AUTOHEAL_CONTAINER_LABEL}=true"
   fi
   if [ "$AUTOHEAL_ONLY_MONITOR_RUNNING" = false ]
   then
     running_filter=""
+    debug_log "Running filter: disabled (monitoring all states)"
   else
     running_filter=",\"status\":\[\"running\"\]"
+    debug_log "Running filter: enabled (only running containers)"
   fi
   url="${HTTP_ENDPOINT}/containers/json?filters=\{\"health\":\[\"unhealthy\"\]${label_filter}${running_filter}\}"
-  docker_curl "$url"
+  debug_log "API URL: $url"
+  local result
+  result=$(docker_curl "$url")
+  debug_log "Container info response: $result"
+  echo "$result"
 }
 
 # shellcheck disable=2039
@@ -72,30 +121,45 @@ restart_container() {
   local container_id="$1"
   local timeout="$2"
 
+  debug_log "Attempting to restart container: $container_id with timeout: ${timeout}s"
   docker_curl -f -X POST "${HTTP_ENDPOINT}/containers/${container_id}/restart?t=${timeout}"
+  local exit_code=$?
+  debug_log "Restart command exit code: $exit_code"
+  return $exit_code
 }
 
 notify_webhook() {
   local text="$@"
 
+  debug_log "Notifying webhook with text: $text"
+
   if [ -n "$WEBHOOK_URL" ]
   then
+    debug_log "Sending webhook to: $WEBHOOK_URL"
     # execute webhook requests as background process to prevent healer from blocking
     curl -s -X POST -H "Content-type: application/json" -d "$(generate_webhook_payload $text)"  "$WEBHOOK_URL"
+  else
+    debug_log "WEBHOOK_URL not set, skipping webhook notification"
   fi
 
   if [ -n "$APPRISE_URL" ]
   then
+    debug_log "Sending Apprise notification to: $APPRISE_URL"
     # execute webhook requests as background process to prevent healer from blocking
     curl -s -X POST -H "Content-type: application/json" -d "$(generate_apprise_payload $text)"  "$APPRISE_URL"
+  else
+    debug_log "APPRISE_URL not set, skipping Apprise notification"
   fi
 }
 
 notify_post_restart_script() {
   if [ -n "$POST_RESTART_SCRIPT" ]
   then
+    debug_log "Executing post-restart script: $POST_RESTART_SCRIPT with args: $@"
     # execute post restart script as background process to prevent healer from blocking
     $POST_RESTART_SCRIPT "$@" &
+  else
+    debug_log "POST_RESTART_SCRIPT not set, skipping"
   fi
 }
 
@@ -121,31 +185,55 @@ EOF
 
 # SIGTERM-handler
 term_handler() {
+  debug_log "Received SIGTERM signal, shutting down..."
   exit 143  # 128 + 15 -- SIGTERM
 }
 
 # shellcheck disable=2039
 trap 'kill $$; term_handler' SIGTERM
 
+debug_log "Command line arguments: $@"
+
 if [ "$1" = "autoheal" ]
 then
+  debug_log "Starting autoheal mode"
+  
   if [ -n "$UNIX_SOCK" ] && ! [ -S "$DOCKER_SOCK" ]
   then
     echo "unix socket is currently not available" >&2
+    debug_log "Unix socket check failed: $DOCKER_SOCK does not exist or is not a socket"
     exit 1
   fi
+  
+  debug_log "Unix socket check passed"
+  
   # Delayed startup
   if [ "$AUTOHEAL_START_PERIOD" -gt 0 ]
   then
-  echo "Monitoring containers for unhealthy status in $AUTOHEAL_START_PERIOD second(s)"
+    echo "Monitoring containers for unhealthy status in $AUTOHEAL_START_PERIOD second(s)"
+    debug_log "Sleeping for $AUTOHEAL_START_PERIOD seconds (start period)"
     sleep "$AUTOHEAL_START_PERIOD" &
     wait $!
   fi
 
+  debug_log "Entering main monitoring loop"
+  
   while true
   do
+    debug_log "Starting new monitoring cycle"
     STOP_TIMEOUT=".Labels[\"autoheal.stop.timeout\"] // $AUTOHEAL_DEFAULT_STOP_TIMEOUT"
-    get_container_info | \
+    
+    debug_log "Fetching unhealthy containers..."
+    container_json=$(get_container_info)
+    
+    if [ -z "$container_json" ] || [ "$container_json" = "[]" ]
+    then
+      debug_log "No unhealthy containers found"
+    else
+      debug_log "Processing unhealthy containers"
+    fi
+    
+    echo "$container_json" | \
       jq -r ".[] | select(.Labels[\"autoheal\"] != \"False\") | foreach . as \$CONTAINER([];[]; \$CONTAINER | .Id, .Names[0], .State, ${STOP_TIMEOUT})" | \
       while read -r CONTAINER_ID && read -r CONTAINER_NAME && read -r CONTAINER_STATE && read -r TIMEOUT
     do
@@ -153,28 +241,38 @@ then
       CONTAINER_SHORT_ID=${CONTAINER_ID:0:12}
       DATE=$(date +%d-%m-%Y" "%H:%M:%S)
 
+      debug_log "Processing container: ID=$CONTAINER_ID, Name=$CONTAINER_NAME, State=$CONTAINER_STATE, Timeout=$TIMEOUT"
+
       if [ "$CONTAINER_NAME" = "null" ]
       then
         echo "$DATE Container name of (${CONTAINER_SHORT_ID}) is null, which implies container does not exist - don't restart" >&2
+        debug_log "Container name is null, skipping restart"
       elif [ "$CONTAINER_STATE" = "restarting" ]
       then
         echo "$DATE Container $CONTAINER_NAME (${CONTAINER_SHORT_ID}) found to be restarting - don't restart"
+        debug_log "Container already restarting, skipping"
       else
         echo "$DATE Container $CONTAINER_NAME (${CONTAINER_SHORT_ID}) found to be unhealthy - Restarting container now with ${TIMEOUT}s timeout"
+        debug_log "Initiating restart for unhealthy container"
         if ! restart_container "$CONTAINER_ID" "$TIMEOUT"
         then
           echo "$DATE Restarting container $CONTAINER_SHORT_ID failed" >&2
+          debug_log "Restart failed, sending failure notification"
           notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be unhealthy. Failed to restart the container!" &
         else
+          debug_log "Restart successful, sending success notification"
           notify_webhook "Container ${CONTAINER_NAME:1} (${CONTAINER_SHORT_ID}) found to be unhealthy. Successfully restarted the container!" &
         fi
         notify_post_restart_script "$CONTAINER_NAME" "$CONTAINER_SHORT_ID" "$CONTAINER_STATE" "$TIMEOUT" &
       fi
     done || true
+    
+    debug_log "Monitoring cycle complete, sleeping for $AUTOHEAL_INTERVAL seconds"
     sleep "$AUTOHEAL_INTERVAL" &
     wait $!
   done
 
 else
+  debug_log "Executing custom command: $@"
   exec "$@"
 fi
